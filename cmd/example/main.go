@@ -5,8 +5,11 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/binary"
 	"fmt"
-	"math/rand"
+	"math"
+	"math/big"
 	"net/http"
 	"os"
 	"os/signal"
@@ -318,7 +321,7 @@ func (app *Application) listUsersHandler(w http.ResponseWriter, r *http.Request)
 	// Simulate database query
 	start := time.Now()
 	users := []string{"alice", "bob", "charlie", "dave", "eve"}
-	time.Sleep(time.Duration(10+rand.Intn(40)) * time.Millisecond)
+	time.Sleep(time.Duration(10+cryptoRandIntn(40)) * time.Millisecond)
 	duration := time.Since(start)
 
 	// Record metrics
@@ -337,7 +340,7 @@ func (app *Application) createUserHandler(w http.ResponseWriter, r *http.Request
 	ctx := r.Context()
 
 	start := time.Now()
-	time.Sleep(time.Duration(20+rand.Intn(30)) * time.Millisecond)
+	time.Sleep(time.Duration(20+cryptoRandIntn(30)) * time.Millisecond)
 	duration := time.Since(start)
 
 	app.obsStack.DB.RecordQuery(ctx, "INSERT", "users", duration, true)
@@ -354,7 +357,7 @@ func (app *Application) getUserHandler(w http.ResponseWriter, r *http.Request) {
 	userID := chi.URLParam(r, "id")
 
 	start := time.Now()
-	time.Sleep(time.Duration(5+rand.Intn(15)) * time.Millisecond)
+	time.Sleep(time.Duration(5+cryptoRandIntn(15)) * time.Millisecond)
 	duration := time.Since(start)
 
 	app.obsStack.DB.RecordQuery(ctx, "SELECT", "users", duration, true)
@@ -373,7 +376,7 @@ func (app *Application) updateUserHandler(w http.ResponseWriter, r *http.Request
 	userID := chi.URLParam(r, "id")
 
 	start := time.Now()
-	time.Sleep(time.Duration(15+rand.Intn(25)) * time.Millisecond)
+	time.Sleep(time.Duration(15+cryptoRandIntn(25)) * time.Millisecond)
 	duration := time.Since(start)
 
 	app.obsStack.DB.RecordQuery(ctx, "UPDATE", "users", duration, true)
@@ -392,7 +395,7 @@ func (app *Application) deleteUserHandler(w http.ResponseWriter, r *http.Request
 	userID := chi.URLParam(r, "id")
 
 	start := time.Now()
-	time.Sleep(time.Duration(10+rand.Intn(20)) * time.Millisecond)
+	time.Sleep(time.Duration(10+cryptoRandIntn(20)) * time.Millisecond)
 	duration := time.Since(start)
 
 	app.obsStack.DB.RecordQuery(ctx, "DELETE", "users", duration, true)
@@ -415,13 +418,13 @@ func (app *Application) cacheGetHandler(w http.ResponseWriter, r *http.Request) 
 	key := chi.URLParam(r, "key")
 
 	start := time.Now()
-	hit := rand.Float32() > 0.3 // 70% hit rate
-	time.Sleep(time.Duration(1+rand.Intn(9)) * time.Millisecond)
+	hit := cryptoRandFloat32() > 0.3 // 70% hit rate
+	time.Sleep(time.Duration(1+cryptoRandIntn(9)) * time.Millisecond)
 	duration := time.Since(start)
 
 	var size int64
 	if hit {
-		size = int64(100 + rand.Intn(900))
+		size = int64(100 + cryptoRandIntn(900))
 	}
 
 	app.obsStack.Cache.RecordGet(ctx, "get", hit, duration, size)
@@ -448,9 +451,9 @@ func (app *Application) cacheSetHandler(w http.ResponseWriter, r *http.Request) 
 	key := chi.URLParam(r, "key")
 
 	start := time.Now()
-	size := int64(100 + rand.Intn(900))
-	success := rand.Float32() > 0.05 // 95% success rate
-	time.Sleep(time.Duration(2+rand.Intn(8)) * time.Millisecond)
+	size := int64(100 + cryptoRandIntn(900))
+	success := cryptoRandFloat32() > 0.05 // 95% success rate
+	time.Sleep(time.Duration(2+cryptoRandIntn(8)) * time.Millisecond)
 	duration := time.Since(start)
 
 	app.obsStack.Cache.RecordSet(ctx, duration, size, success)
@@ -475,8 +478,8 @@ func (app *Application) cacheDeleteHandler(w http.ResponseWriter, r *http.Reques
 	key := chi.URLParam(r, "key")
 
 	start := time.Now()
-	success := rand.Float32() > 0.05 // 95% success rate
-	time.Sleep(time.Duration(1+rand.Intn(5)) * time.Millisecond)
+	success := cryptoRandFloat32() > 0.05 // 95% success rate
+	time.Sleep(time.Duration(1+cryptoRandIntn(5)) * time.Millisecond)
 	duration := time.Since(start)
 
 	app.obsStack.Cache.RecordDelete(ctx, duration, success)
@@ -501,10 +504,10 @@ func (app *Application) cacheDeleteHandler(w http.ResponseWriter, r *http.Reques
 // ============================================================================
 
 func (app *Application) slowHandler(w http.ResponseWriter, r *http.Request) {
-	delay := 2000 + rand.Intn(1000)
+	delay := 2000 + cryptoRandIntn(1000)
 	time.Sleep(time.Duration(delay) * time.Millisecond)
 
-	app.log.Warn("Slow operation completed", zap.Int("delay_ms", delay))
+	app.log.Warn("Slow operation completed", zap.Int64("delay_ms", delay))
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
@@ -515,7 +518,7 @@ func (app *Application) errorHandler(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
 	start := time.Now()
-	time.Sleep(time.Duration(10+rand.Intn(20)) * time.Millisecond)
+	time.Sleep(time.Duration(10+cryptoRandIntn(20)) * time.Millisecond)
 	duration := time.Since(start)
 
 	// Simulate failed database query
@@ -532,10 +535,10 @@ func (app *Application) errorHandler(w http.ResponseWriter, r *http.Request) {
 func (app *Application) randomHandler(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	success := rand.Float32() > 0.2 // 80% success rate
+	success := cryptoRandFloat32() > 0.2 // 80% success rate
 
 	start := time.Now()
-	time.Sleep(time.Duration(10+rand.Intn(90)) * time.Millisecond)
+	time.Sleep(time.Duration(10+cryptoRandIntn(90)) * time.Millisecond)
 	duration := time.Since(start)
 
 	app.obsStack.DB.RecordQuery(ctx, "SELECT", "data", duration, success)
@@ -543,11 +546,32 @@ func (app *Application) randomHandler(w http.ResponseWriter, r *http.Request) {
 	if success {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		fmt.Fprintf(w, `{"result":"success","data":"random_data_%d"}`, rand.Intn(1000))
+		fmt.Fprintf(w, `{"result":"success","data":"random_data_%d"}`, cryptoRandIntn(1000))
 	} else {
 		app.log.Error("Random error occurred")
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
 		fmt.Fprintf(w, `{"error":"random error occurred"}`)
 	}
+}
+
+// ============================================================================
+// Helper Functions
+// ============================================================================
+
+func cryptoRandIntn(n int64) int64 {
+	r, err := rand.Int(rand.Reader, big.NewInt(n))
+	if err != nil {
+		panic(err)
+	}
+	return r.Int64()
+}
+
+func cryptoRandFloat32() float32 {
+	var b [4]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		panic(err)
+	}
+	u := binary.BigEndian.Uint32(b[:])
+	return float32(u) / float32(math.MaxUint32)
 }

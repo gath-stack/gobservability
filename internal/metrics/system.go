@@ -2,6 +2,7 @@ package metrics
 
 import (
 	"context"
+	"math"
 	"os"
 	"runtime"
 
@@ -702,6 +703,10 @@ func (sm *SystemMetrics) collectProcess(o metric.Observer) {
 // Currently, this function reports system uptime in seconds.
 func (sm *SystemMetrics) collectSystem(o metric.Observer) {
 	if uptime, err := host.Uptime(); err == nil {
+		if uptime > math.MaxInt64 {
+			uptime = math.MaxInt64
+		}
+		// #nosec G115 -- uptime is in seconds and always fits in int64
 		o.ObserveInt64(sm.uptimeSeconds, int64(uptime))
 	}
 }
