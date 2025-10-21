@@ -166,8 +166,10 @@ func (h *HTTPMetrics) RecordRequest(
 // Production recommendations:
 //   - Use middleware to increment/decrement automatically.
 //   - Useful for identifying overload or concurrency spikes.
-func (h *HTTPMetrics) IncrementActiveRequests(ctx context.Context) {
-	h.activeRequests.Add(ctx, 1)
+func (h *HTTPMetrics) IncrementActiveRequests(ctx context.Context, method string) {
+	h.activeRequests.Add(ctx, 1, metric.WithAttributes(
+		attribute.String("http.method", method),
+	))
 }
 
 // DecrementActiveRequests decrements the counter tracking active HTTP requests.
@@ -181,13 +183,11 @@ func (h *HTTPMetrics) IncrementActiveRequests(ctx context.Context) {
 // Production recommendations:
 //   - Always ensure balanced increments and decrements.
 //   - Combine with circuit breakers to detect overload conditions.
-func (h *HTTPMetrics) DecrementActiveRequests(ctx context.Context) {
-	h.activeRequests.Add(ctx, -1)
+func (h *HTTPMetrics) DecrementActiveRequests(ctx context.Context, method string) {
+	h.activeRequests.Add(ctx, -1, metric.WithAttributes(
+		attribute.String("http.method", method),
+	))
 }
-
-// ============================================================================
-// Middleware
-// ============================================================================
 
 // Middleware returns a Chi-compatible middleware that automatically
 // records HTTP metrics for all requests.
@@ -219,9 +219,8 @@ func (h *HTTPMetrics) Middleware() func(http.Handler) http.Handler {
 			start := time.Now()
 			ctx := r.Context()
 
-			// Track active requests
-			h.IncrementActiveRequests(ctx)
-			defer h.DecrementActiveRequests(ctx)
+			h.IncrementActiveRequests(ctx, r.Method)
+			defer h.DecrementActiveRequests(ctx, r.Method)
 
 			// Wrap response writer to capture status and bytes
 			ww := middleware.NewWrapResponseWriter(w, r.ProtoMajor)
@@ -229,7 +228,7 @@ func (h *HTTPMetrics) Middleware() func(http.Handler) http.Handler {
 			// Process request
 			next.ServeHTTP(ww, r)
 
-			// Record metrics after request completes
+			// Record metrics after request completes (DOPO - con route pattern)
 			duration := time.Since(start)
 			route := getRoutePattern(r)
 

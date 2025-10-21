@@ -53,13 +53,20 @@ import (
 
 	"github.com/gath-stack/gobservability/internal/config"
 	metrics "github.com/gath-stack/gobservability/internal/metrics"
+	"github.com/gath-stack/gobservability/internal/tracing"
+	"github.com/go-chi/chi/v5"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/propagation"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/resource"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.17.0"
+	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
 )
 
@@ -100,6 +107,22 @@ type Stack struct {
 	// System provides system-level metrics (CPU, disk, network).
 	// May be nil if DisableSystemMetrics is true.
 	System *metrics.SystemMetrics
+
+	// Tracing provides distributed tracing for HTTP, DB, and Cache operations.
+	// May be nil if TracingEnabled is false.
+	Tracing *TracingStack
+}
+
+// TracingStack holds all tracing components.
+type TracingStack struct {
+	// HTTP provides HTTP request tracing and middleware.
+	HTTP *tracing.HTTPTracing
+
+	// DB provides database operation tracing.
+	DB *tracing.DBTracing
+
+	// Cache provides cache operation tracing.
+	Cache *tracing.CacheTracing
 }
 
 // InitOptions configures optional behaviors during observability stack initialization.
@@ -124,6 +147,7 @@ type Observability struct {
 	cleanupFuncs []func(context.Context) error
 	initialized  bool
 	meter        metric.Meter
+	tracer       trace.Tracer
 }
 
 // Init initializes the complete observability stack automatically.
@@ -189,6 +213,17 @@ func Init(log Logger, opts *InitOptions) (*Stack, error) {
 					zap.Error(shutdownErr))
 			}
 			return nil, fmt.Errorf("failed to initialize metrics: %w", err)
+		}
+	}
+
+	// Initialize all tracing automatically if enabled
+	if cfg.TracingEnabled {
+		if err := stack.initializeTracing(); err != nil {
+			if shutdownErr := obs.Shutdown(ctx); shutdownErr != nil {
+				log.Error("failed to shutdown observability after initialization error",
+					zap.Error(shutdownErr))
+			}
+			return nil, fmt.Errorf("failed to initialize tracing: %w", err)
 		}
 	}
 
@@ -285,7 +320,12 @@ func (o *Observability) Start(ctx context.Context) error {
 		}
 	}
 
-	// TODO: Initialize Tracing (future)
+	if o.config.TracingEnabled {
+		if err := o.initTracing(ctx); err != nil {
+			return fmt.Errorf("failed to initialize tracing: %w", err)
+		}
+	}
+
 	// TODO: Initialize Logs (future)
 	// TODO: Initialize Profiling (future)
 
@@ -507,6 +547,102 @@ func (s *Stack) initializeMetrics(opts *InitOptions) error {
 	return nil
 }
 
+func (o *Observability) initTracing(ctx context.Context) error {
+	o.log.Debug("Initializing tracing exporter",
+		zap.String("endpoint", o.config.OTLPEndpoint),
+		zap.Float64("sampling_rate", o.config.TraceSamplingRate))
+
+	// Create OTLP gRPC trace exporter
+	exporter, err := otlptracegrpc.New(
+		ctx,
+		otlptracegrpc.WithEndpoint(o.config.OTLPEndpoint),
+		otlptracegrpc.WithInsecure(),
+	)
+	if err != nil {
+		return fmt.Errorf("failed to create OTLP trace exporter: %w", err)
+	}
+
+	// Create resource with service identification
+	res, err := resource.New(
+		ctx,
+		resource.WithAttributes(
+			semconv.ServiceName(o.config.ServiceName),
+			semconv.ServiceVersion(o.config.ServiceVersion),
+			semconv.DeploymentEnvironment(o.config.Environment),
+			semconv.HostName(o.config.HostName),
+		),
+		resource.WithAttributes(
+			attribute.String("deployment.id", o.config.DeploymentID),
+		),
+	)
+	if err != nil {
+		return fmt.Errorf("failed to create resource: %w", err)
+	}
+
+	// Create tracer provider with sampling
+	provider := sdktrace.NewTracerProvider(
+		sdktrace.WithBatcher(exporter,
+			sdktrace.WithMaxExportBatchSize(o.config.TraceBatchSize),
+		),
+		sdktrace.WithResource(res),
+		sdktrace.WithSampler(sdktrace.TraceIDRatioBased(o.config.TraceSamplingRate)),
+	)
+
+	// Set global tracer provider
+	otel.SetTracerProvider(provider)
+
+	// Set global propagator for distributed tracing
+	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
+		propagation.TraceContext{},
+		propagation.Baggage{},
+	))
+
+	// Create tracer instance
+	o.tracer = provider.Tracer(o.config.ServiceName)
+
+	// Register cleanup
+	o.cleanupFuncs = append(o.cleanupFuncs, func(ctx context.Context) error {
+		o.log.Debug("Shutting down tracer provider")
+		if err := provider.Shutdown(ctx); err != nil {
+			return fmt.Errorf("failed to shutdown tracer provider: %w", err)
+		}
+		o.log.Debug("Tracer provider shutdown complete")
+		return nil
+	})
+
+	o.log.Info("Tracing initialized",
+		zap.String("endpoint", o.config.OTLPEndpoint),
+		zap.String("service", o.config.ServiceName),
+		zap.Float64("sampling_rate", o.config.TraceSamplingRate))
+
+	return nil
+}
+
+func (s *Stack) initializeTracing() error {
+	tracer := s.obs.Tracer()
+
+	s.log.Debug("Initializing HTTP tracing")
+	httpTracing := tracing.NewHTTPTracing(tracer)
+
+	s.log.Debug("Initializing database tracing")
+	dbTracing := tracing.NewDBTracing(tracer)
+
+	s.log.Debug("Initializing cache tracing")
+	cacheTracing := tracing.NewCacheTracing(tracer)
+
+	s.Tracing = &TracingStack{
+		HTTP:  httpTracing,
+		DB:    dbTracing,
+		Cache: cacheTracing,
+	}
+
+	s.log.Info("Tracing initialized",
+		zap.String("service", s.obs.config.ServiceName),
+		zap.Float64("sampling_rate", s.obs.config.TraceSamplingRate))
+
+	return nil
+}
+
 // Meter returns the global OpenTelemetry meter for creating custom metric instruments.
 //
 // This method panics if observability is not initialized or metrics are not enabled.
@@ -523,6 +659,17 @@ func (o *Observability) Meter() metric.Meter {
 		panic("observability not initialized or metrics not enabled")
 	}
 	return o.meter
+}
+
+func (o *Observability) Tracer() trace.Tracer {
+	if o.tracer == nil {
+		panic("observability not initialized or tracing not enabled")
+	}
+	return o.tracer
+}
+
+func (s *Stack) Tracer() trace.Tracer {
+	return s.obs.Tracer()
 }
 
 // IsInitialized returns true if the observability stack has been initialized.
@@ -580,4 +727,137 @@ func (s *Stack) Meter() metric.Meter {
 //	router.Get("/api/users", handler)
 func (s *Stack) HTTPMetricsMiddleware() func(http.Handler) http.Handler {
 	return s.HTTP.Middleware()
+}
+
+// HTTPObservabilityMiddleware returns a Chi-compatible middleware that records
+// both HTTP metrics and distributed traces in a single pass.
+//
+// This middleware uses a "lazy capture" approach: it captures the route pattern
+// AFTER the handler executes, when Chi has fully populated the RouteContext.
+// This allows it to work as a global middleware while still using route patterns.
+func (s *Stack) HTTPObservabilityMiddleware() func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			start := time.Now()
+			ctx := r.Context()
+			var span trace.Span
+
+			if s.obs.config.MetricsEnabled && s.HTTP != nil {
+				s.HTTP.IncrementActiveRequests(ctx, r.Method)
+				defer s.HTTP.DecrementActiveRequests(ctx, r.Method)
+			}
+
+			// Start span with temporary name if tracing is enabled
+			if s.obs.config.TracingEnabled && s.Tracing != nil {
+				ctx, span = s.obs.tracer.Start(ctx, "HTTP "+r.Method,
+					trace.WithSpanKind(trace.SpanKindServer),
+					trace.WithAttributes(
+						attribute.String("http.method", r.Method),
+						attribute.String("http.scheme", scheme(r)),
+						attribute.String("http.host", r.Host),
+						attribute.String("http.user_agent", r.UserAgent()),
+						attribute.String("http.client_ip", clientIP(r)),
+					),
+				)
+				defer span.End()
+			}
+
+			wrapped := &observabilityResponseWriter{
+				ResponseWriter: w,
+				statusCode:     http.StatusOK,
+			}
+
+			// Execute handler
+			next.ServeHTTP(wrapped, r.WithContext(ctx))
+
+			// Lazy capture of route pattern
+			routePattern := getRoutePattern(r)
+			duration := time.Since(start)
+
+			// Record metrics with route pattern
+			if s.obs.config.MetricsEnabled && s.HTTP != nil {
+				s.HTTP.RecordRequest(
+					ctx,
+					r.Method,
+					routePattern,
+					wrapped.statusCode,
+					duration,
+					r.ContentLength,
+					wrapped.bytesWritten,
+				)
+			}
+
+			// Update span
+			if s.obs.config.TracingEnabled && span != nil {
+				span.SetName(r.Method + " " + routePattern)
+				span.SetAttributes(
+					attribute.String("http.route", routePattern),
+					attribute.Int("http.status_code", wrapped.statusCode),
+					attribute.Int64("http.response_content_length", wrapped.bytesWritten),
+				)
+
+				if wrapped.statusCode >= 400 {
+					span.SetStatus(codes.Error, http.StatusText(wrapped.statusCode))
+					span.SetAttributes(attribute.Bool("error", true))
+				} else {
+					span.SetStatus(codes.Ok, "")
+				}
+			}
+		})
+	}
+}
+
+// getRoutePattern extracts the route pattern from Chi's RouteContext.
+// Returns the templated route (e.g., "/api/users/{id}") instead of the actual path.
+// Falls back to the actual path if route pattern is not available.
+func getRoutePattern(r *http.Request) string {
+	rctx := chi.RouteContext(r.Context())
+	if rctx != nil {
+		// RoutePattern returns the matched route pattern
+		// e.g., "/api/users/{id}" instead of "/api/users/123"
+		if pattern := rctx.RoutePattern(); pattern != "" {
+			return pattern
+		}
+	}
+	// Fallback to actual path (for routes without patterns)
+	return r.URL.Path
+}
+
+// observabilityResponseWriter wraps http.ResponseWriter per catturare status e bytes.
+type observabilityResponseWriter struct {
+	http.ResponseWriter
+	statusCode   int
+	bytesWritten int64
+}
+
+func (w *observabilityResponseWriter) WriteHeader(statusCode int) {
+	w.statusCode = statusCode
+	w.ResponseWriter.WriteHeader(statusCode)
+}
+
+func (w *observabilityResponseWriter) Write(b []byte) (int, error) {
+	n, err := w.ResponseWriter.Write(b)
+	w.bytesWritten += int64(n)
+	return n, err
+}
+
+// Helper functions
+func scheme(r *http.Request) string {
+	if r.TLS != nil {
+		return "https"
+	}
+	if scheme := r.Header.Get("X-Forwarded-Proto"); scheme != "" {
+		return scheme
+	}
+	return "http"
+}
+
+func clientIP(r *http.Request) string {
+	if ip := r.Header.Get("X-Forwarded-For"); ip != "" {
+		return ip
+	}
+	if ip := r.Header.Get("X-Real-IP"); ip != "" {
+		return ip
+	}
+	return r.RemoteAddr
 }
