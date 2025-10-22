@@ -104,10 +104,19 @@ func main() {
 		}
 	}()
 
+	if obsStack.Config().LogsEnabled && obsStack.Logs != nil {
+		if err := obsStack.EnableLogsExport(log); err != nil {
+			log.Error("Failed to enable logs export", zap.Error(err))
+		} else {
+			log.Info("Logs export to Loki is ACTIVE")
+		}
+	}
+
 	log.Info("Observability initialized",
 		zap.Strings("components", obsStack.Config().EnabledComponents()),
 		zap.Bool("metrics", obsStack.Config().MetricsEnabled),
-		zap.Bool("tracing", obsStack.Config().TracingEnabled))
+		zap.Bool("tracing", obsStack.Config().TracingEnabled),
+		zap.Bool("logs", obsStack.Config().LogsEnabled))
 
 	// ========================================
 	// 3. Setup HTTP Server

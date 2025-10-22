@@ -52,6 +52,7 @@ import (
 	"time"
 
 	"github.com/gath-stack/gobservability/internal/config"
+	"github.com/gath-stack/gobservability/internal/logs"
 	metrics "github.com/gath-stack/gobservability/internal/metrics"
 	"github.com/gath-stack/gobservability/internal/tracing"
 	"github.com/go-chi/chi/v5"
@@ -68,6 +69,7 @@ import (
 	semconv "go.opentelemetry.io/otel/semconv/v1.17.0"
 	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
 // Logger is the interface for logging operations used throughout the observability stack.
@@ -111,6 +113,8 @@ type Stack struct {
 	// Tracing provides distributed tracing for HTTP, DB, and Cache operations.
 	// May be nil if TracingEnabled is false.
 	Tracing *TracingStack
+
+	Logs *logs.LogsProvider
 }
 
 // TracingStack holds all tracing components.
@@ -148,6 +152,7 @@ type Observability struct {
 	initialized  bool
 	meter        metric.Meter
 	tracer       trace.Tracer
+	logsProvider *logs.LogsProvider
 }
 
 // Init initializes the complete observability stack automatically.
@@ -225,6 +230,11 @@ func Init(log Logger, opts *InitOptions) (*Stack, error) {
 			}
 			return nil, fmt.Errorf("failed to initialize tracing: %w", err)
 		}
+	}
+
+	if cfg.LogsEnabled {
+		stack.Logs = obs.logsProvider
+		log.Info("Logs initialized and ready")
 	}
 
 	log.Info("Observability stack initialized successfully",
@@ -326,7 +336,12 @@ func (o *Observability) Start(ctx context.Context) error {
 		}
 	}
 
-	// TODO: Initialize Logs (future)
+	if o.config.LogsEnabled {
+		if err := o.initLogs(ctx); err != nil {
+			return fmt.Errorf("failed to initialize logs: %w", err)
+		}
+	}
+
 	// TODO: Initialize Profiling (future)
 
 	o.log.Info("Observability stack started successfully",
@@ -643,6 +658,95 @@ func (s *Stack) initializeTracing() error {
 	return nil
 }
 
+func (o *Observability) initLogs(ctx context.Context) error {
+	o.log.Debug("Initializing logs exporter",
+		zap.String("endpoint", o.config.OTLPEndpoint))
+
+	// Create resource (same as metrics/tracing)
+	res, err := resource.New(
+		ctx,
+		resource.WithAttributes(
+			semconv.ServiceName(o.config.ServiceName),
+			semconv.ServiceVersion(o.config.ServiceVersion),
+			semconv.DeploymentEnvironment(o.config.Environment),
+			semconv.HostName(o.config.HostName),
+		),
+		resource.WithAttributes(
+			attribute.String("deployment.id", o.config.DeploymentID),
+		),
+	)
+	if err != nil {
+		return fmt.Errorf("failed to create resource: %w", err)
+	}
+
+	// Create logs provider
+	logsProvider, err := logs.NewLogsProvider(ctx, o.config.OTLPEndpoint, res)
+	if err != nil {
+		return fmt.Errorf("failed to create logs provider: %w", err)
+	}
+
+	o.logsProvider = logsProvider
+
+	// Register cleanup
+	o.cleanupFuncs = append(o.cleanupFuncs, func(ctx context.Context) error {
+		o.log.Debug("Shutting down logs provider")
+		if err := logsProvider.Shutdown(ctx); err != nil {
+			return fmt.Errorf("failed to shutdown logs provider: %w", err)
+		}
+		o.log.Debug("Logs provider shutdown complete")
+		return nil
+	})
+
+	o.log.Info("Logs initialized",
+		zap.String("endpoint", o.config.OTLPEndpoint),
+		zap.String("service", o.config.ServiceName))
+
+	return nil
+}
+
+// EnableLogsExport hooks the application logger to send logs to OTLP.
+//
+// This method reconfigures the logger to use a TeeCore that sends logs
+// to both console and OTLP simultaneously.
+//
+// Must be called after Init() and after the logger is initialized.
+//
+// Example:
+//
+//	log := logger.Get()
+//	obsStack, _ := observability.Init(log, nil)
+//	if err := obsStack.EnableLogsExport(log); err != nil {
+//	    log.Fatal("Failed to enable logs export", zap.Error(err))
+//	}
+//	log.Info("This log goes to both console and Loki")
+func (s *Stack) EnableLogsExport(log Logger) error {
+	if !s.obs.config.LogsEnabled || s.Logs == nil {
+		return fmt.Errorf("logs not enabled or not initialized")
+	}
+
+	s.log.Info("Enabling OTLP logs export for application logger")
+
+	// Check if the logger has the required methods
+	type OTELCapableLogger interface {
+		UnderlyingLogger() *zap.Logger
+		WithOTELCore(zapcore.Core)
+	}
+
+	otelLogger, ok := log.(OTELCapableLogger)
+	if !ok {
+		return fmt.Errorf("logger does not support OTLP export (missing UnderlyingLogger/WithOTELCore methods)")
+	}
+
+	// Create OTEL core
+	otelCore := logs.OTELCore(zapcore.DebugLevel)
+
+	// Add OTEL core to the logger
+	otelLogger.WithOTELCore(otelCore)
+
+	s.log.Info("OTLP logs export enabled - logs will be sent to Loki")
+	return nil
+}
+
 // Meter returns the global OpenTelemetry meter for creating custom metric instruments.
 //
 // This method panics if observability is not initialized or metrics are not enabled.
@@ -670,6 +774,17 @@ func (o *Observability) Tracer() trace.Tracer {
 
 func (s *Stack) Tracer() trace.Tracer {
 	return s.obs.Tracer()
+}
+
+func (o *Observability) LogsProvider() *logs.LogsProvider {
+	if o.logsProvider == nil {
+		panic("observability not initialized or logs not enabled")
+	}
+	return o.logsProvider
+}
+
+func (s *Stack) LogsProvider() *logs.LogsProvider {
+	return s.obs.LogsProvider()
 }
 
 // IsInitialized returns true if the observability stack has been initialized.

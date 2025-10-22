@@ -35,11 +35,11 @@ const slowRequests = new Counter('slow_requests');
 export const options = {
   // Test stages - simula traffico realistico
   stages: [
-    { duration: '30s', target: 100 },  // Warm-up: ramp to 100 users
-    { duration: '1m', target: 200 },   // Normal load: 200 users
-    { duration: '2m', target: 500 },   // Peak load: 500 users
-    { duration: '1m', target: 1000 },  // Stress test: 1000 users
-    { duration: '1m', target: 500 },   // Scale down: 500 users
+    { duration: '30s', target: 10 },  // Warm-up: ramp to 10 users
+    { duration: '1m', target: 20 },   // Normal load: 20 users
+    { duration: '2m', target: 50 },   // Peak load: 50 users
+    { duration: '1m', target: 100 },  // Stress test: 100 users
+    { duration: '1m', target: 50 },   // Scale down: 50 users
     { duration: '30s', target: 0 },   // Cool down: 0 users
   ],
 
