@@ -35,7 +35,6 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
-	"github.com/joho/godotenv"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
@@ -45,39 +44,11 @@ import (
 )
 
 func main() {
-	// Load .env file if present (optional in production, required in development)
-	// In production, use actual environment variables set by the deployment system
-	if err := godotenv.Load(); err != nil {
-		// Not fatal - in production we expect real env vars
-		fmt.Fprintf(os.Stderr, "Warning: .env file not found or could not be loaded (this is normal in production)\n")
-	}
-
 	// ========================================
 	// 1. Initialize Logger
 	// ========================================
-	// Initialize logger FIRST - fail fast if configuration is invalid
-	// This uses the strict FromEnv() which requires all environment variables
-	logCfg, err := logger.FromEnv()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "FATAL: Invalid logger configuration: %v\n", err)
-		fmt.Fprintf(os.Stderr, "Required environment variables: LOG_LEVEL, APP_ENV, APP_NAME\n")
-		os.Exit(1)
-	}
-
-	if err := logger.InitGlobal(logCfg); err != nil {
-		fmt.Fprintf(os.Stderr, "FATAL: Failed to initialize logger: %v\n", err)
-		os.Exit(1)
-	}
-
-	// Ensure logs are flushed before exit
-	defer func() {
-		if err := logger.Get().Sync(); err != nil {
-			// Logger sync errors on stdout/stderr are often harmless on some systems
-			// but we log them anyway for visibility
-			fmt.Fprintf(os.Stderr, "Warning: failed to sync logger: %v\n", err)
-		}
-	}()
-
+	logger.MustInitFromEnv()
+	defer logger.Get().Sync()
 	log := logger.Get()
 
 	// ========================================
