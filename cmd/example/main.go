@@ -48,8 +48,12 @@ func main() {
 	// 1. Initialize Logger
 	// ========================================
 	logger.MustInitFromEnv()
-	defer logger.Get().Sync()
 	log := logger.Get()
+	defer func() {
+		if err := logger.Get().Sync(); err != nil {
+			fmt.Fprintf(os.Stderr, "logger sync error: %v\n", err)
+		}
+	}()
 
 	// ========================================
 	// 2. Initialize Observability Stack
